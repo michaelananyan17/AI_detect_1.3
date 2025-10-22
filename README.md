@@ -35,7 +35,7 @@ Parameters: User sets max sequence length and embedding dimension
 
 Processing:
 
-80/20 train-validation split
+70/30 train-validation split
 
 Creates vocabulary from training texts only
 
