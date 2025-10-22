@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI/Human Text Detector Pipeline - Optimized and Complete</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.x/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-vis"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { display: flex; flex-wrap: wrap; gap: 20px; }
+        .section { border: 1px solid #ccc; padding: 15px; border-radius: 5px; flex: 1 1 300px; }
+        h3 { border-bottom: 2px solid #eee; padding-bottom: 5px; }
+        .status { margin-top: 10px; font-weight: bold; }
+        #live-prediction-output { margin-top: 15px; padding: 10px; border-radius: 5px; min-height: 50px; }
+        .human { background-color: #e6ffe6; color: green; }
+        .ai { background-color: #ffe6e6; color: red; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    </style>
+</head>
+<body>
+
+    <h1>AI/Human Text Detection Pipeline (Optimized and Complete)</h1>
+    <div class="container">
+
+        <div class="section" id="step1">
+            <h3>1. DATA LOAD & PREPARATION</h3>
+            <label>Train CSV:</label>
+            <input type="file" id="trainFile" accept=".csv"><br><br>
+            <label>Test CSV (for batch prediction):</label>
+            <input type="file" id="testFile" accept=".csv"><br><br>
+            <button onclick="loadAndPrepareData()">Load & Prepare Data</button>
+            <div class="status" id="loadStatus">Awaiting File Upload...</div>
+        </div>
+
+        <div class="section" id="step3">
+            <h3>3. PREPROCESSING & TOKENIZATION</h3>
+            <label>Max Sequence Length:</label>
+            <input type="number" id="maxLength" value="150" min="10">
+            <label>Embedding Dimension:</label>
+            <input type="number" id="embeddingDim" value="128" min="32"><br><br>
+            <button onclick="preprocessAndTokenize()" disabled id="tokenizeBtn">Tokenize & Split</button>
+            <div class="status" id="tokenizeStatus"></div>
+        </div>
+
+        <div class="section" id="step56">
+            <h3>5 & 6. MODEL CONSTRUCTION & TRAINING</h3>
+            <button onclick="trainModel()" disabled id="trainBtn">Build & Train Model</button>
+            <div class="status" id="trainStatus"></div>
+        </div>
+
+        <div class="section" id="step7">
+            <h3>7. LIVE PREDICTION INTERFACE</h3>
+            <textarea id="liveTextInput" rows="5" cols="40" placeholder="Paste the ANSWER TEXT only here..."></textarea><br>
+            <button onclick="livePredict()" disabled id="predictBtn">Predict</button>
+            <div id="live-prediction-output"></div>
+        </div>
+
+        <div class="section" id="step89">
+            <h3>8 & 9. EVALUATION & BATCH EXPORT</h3>
+            <button onclick="evaluateModel()" disabled id="evaluateBtn">Evaluate Model (Metrics)</button><br><br>
+            <button onclick="batchPredictAndExport()" disabled id="batchBtn">Batch Predict & Export CSV</button>
+            <div class="status" id="exportStatus"></div>
+        </div>
+
+    </div>
+    
+    <div id="vis-container"></div>
+    <div id="metrics-output"></div>
+
+    <script>
+        // Global variables to hold data, model, and vocabulary
+        let trainData, testData;
+        // NOTE: Keeping all tensors globally available until disposal in steps 8/9
+        let trainXs, trainYs, valXs, valYs, testXs;
+        let wordIndex = {};
+        let vocabSize = 0;
+        let model;
+
+        // --- STEP 1: DATA LOAD & PREPARATION ---
+        async function loadAndPrepareData() {
+            const trainFile = document.getElementById('trainFile').files[0];
+            const testFile = document.getElementById('testFile').files[0];
+            const loadStatus = document.getElementById('loadStatus');
+
+            if (!trainFile || !testFile) {
+                loadStatus.textContent = "Please upload both train.csv and test.csv.";
+                return;
+            }
+
+            try {
+                // Helper to read and parse CSV
+                const parseCSV = (file) => new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const csvText = e.target.result;
+                        const lines = csvText.split('\n').filter(l => l.trim() !== '');
+                        const header = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+                        
+                        // NOTE: We only care about answer_text and label, as per the user's requirement.
+                        const textColIndex = header.indexOf('answer_text');
+                        const labelColIndex = header.indexOf('label');
+
+                        if (textColIndex === -1 || labelColIndex === -1) {
+                            return reject("CSV must contain 'answer_text' and 'label' columns.");
+                        }
+
+                        const data = lines.slice(1).map(line => {
+                            // Simple CSV parsing (handles quoted fields containing commas)
+                            // This regex splits by comma only if it's NOT inside quotes.
+                            const parts = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/); 
+                            
+                            // Ensure the line has enough parts after splitting
+                            if (parts.length < header.length) return null; 
+
+                            // Get the text and label, handling potential missing columns
+                            let textPart = parts[textColIndex];
+                            let labelPart = parts[labelColIndex];
+                            
+                            if (typeof textPart === 'undefined' || typeof labelPart === 'undefined') return null;
+
+                            // Basic cleaning (removing surrounding quotes and escaping)
+                            let text = textPart.replace(/^"|"$/g, '').replace(/\\n/g, ' ').replace(/\\r/g, ' ');
+                            let label = parseInt(labelPart);
+
+                            // Validate data format
+                            if (!isNaN(label) && (label === 0 || label === 1) && text.length > 0) {
+                                return { text: text, label: label, original_text: textPart };
+                            }
+                            return null;
+                        }).filter(entry => entry !== null); // Filter out invalid entries
+
+                        resolve(data);
+                    };
+                    reader.onerror = reject;
+                    reader.readAsText(file);
+                });
+
+                loadStatus.textContent = "Processing data...";
+                trainData = await parseCSV(trainFile);
+                testData = await parseCSV(testFile);
+
+                loadStatus.textContent = `✅ Data Loaded! Train samples: ${trainData.length}, Test samples: ${testData.length}.`;
+                document.getElementById('tokenizeBtn').disabled = false;
+                
+                // --- STEP 2: DATA INSPECTION & ANALYSIS ---
+                analyzeData(trainData);
+
+            } catch (error) {
+                loadStatus.textContent = `❌ Error loading data: ${error}`;
+                console.error(error);
+            } finally {
+                tf.tidy(() => {}); 
+            }
+        }
+
+        // --- STEP 2: DATA INSPECTION & ANALYSIS (Visualization) ---
+        function analyzeData(data) {
+            const labels = data.map(d => d.label);
+            const humanCount = labels.filter(l => l === 0).length;
+            const aiCount = labels.filter(l => l === 1).length;
+            const total = labels.length;
+
+            const values = [
+                { index: 'Human (0)', value: humanCount },
+                { index: 'AI (1)', value: aiCount }
+            ];
+
+            const container = document.getElementById('vis-container');
+            container.innerHTML = ''; // Clear previous visualizations
+            tfvis.render.barchart(
+                container,
+                values,
+                {
+                    title: `Class Balance (Total: ${total} samples)`,
+                    height: 250,
+                    fontSize: 14
+                }
+            );
+
+            // Flag imbalanced datasets
+            const imbalanceRatio = Math.min(humanCount, aiCount) / Math.max(humanCount, aiCount);
+            if (imbalanceRatio < 0.5) {
+                const flag = document.createElement('div');
+                flag.textContent = "⚠️ Warning: Dataset is significantly imbalanced (ratio < 0.5).";
+                flag.style.color = 'orange';
+                container.appendChild(flag);
+            }
+        }
+
+        // --- STEP 3: TEXT PREPROCESSING & TOKENIZATION ---
+        function preprocessAndTokenize() {
+            // MAX_LENGTH and EMBEDDING_DIM increased for better performance
+            const maxLength = parseInt(document.getElementById('maxLength').value) || 150;
+            const tokenizeStatus = document.getElementById('tokenizeStatus');
+
+            if (!trainData || trainData.length === 0) {
+                tokenizeStatus.textContent = "Please load data first.";
+                return;
+            }
+
+            tokenizeStatus.textContent = "Building vocabulary and tokenizing...";
+            
+            tf.tidy(() => { // Use tidy for all tensor creation here
+                // 1. Create vocabulary from training texts only
+                const allTrainWords = trainData.flatMap(d => d.text.toLowerCase().split(/\W+/).filter(w => w.length > 0));
+                const wordCounts = allTrainWords.reduce((acc, word) => {
+                    acc[word] = (acc[word] || 0) + 1;
+                    return acc;
+                }, {});
+
+                const sortedWords = Object.keys(wordCounts).sort((a, b) => wordCounts[b] - wordCounts[a]);
+                
+                // Start index from 2 (0 for padding, 1 for OOV/Unknown)
+                wordIndex = {'<pad>': 0, '<unk>': 1};
+                sortedWords.forEach((word, i) => {
+                    wordIndex[word] = i + 2;
+                });
+                vocabSize = Object.keys(wordIndex).length;
+
+                // 2. Convert text to integer sequences and pad/truncate
+                const textsToSequences = (data) => data.map(d => {
+                    const sequence = d.text.toLowerCase().split(/\W+/)
+                        .filter(w => w.length > 0)
+                        .map(word => wordIndex[word] || wordIndex['<unk>']);
+
+                    // Pad/truncate
+                    if (sequence.length > maxLength) {
+                        return sequence.slice(0, maxLength); // Truncate
+                    } else if (sequence.length < maxLength) {
+                        const padding = new Array(maxLength - sequence.length).fill(wordIndex['<pad>']);
+                        return sequence.concat(padding); // Pad
+                    }
+                    return sequence;
+                });
+                
+                const trainSequences = textsToSequences(trainData);
+                const testSequences = textsToSequences(testData);
+
+                // Convert labels to tensors (2D shape for binary cross-entropy)
+                const trainLabels = tf.tensor2d(trainData.map(d => [d.label]), [trainData.length, 1], 'float32');
+                
+                // 3. 80/20 train-validation split
+                const trainSize = Math.floor(trainSequences.length * 0.8);
+
+                // Initialize Tensors
+                // Tensors are created in the global scope to be accessible later
+                if (trainXs) trainXs.dispose();
+                if (trainYs) trainYs.dispose();
+                if (valXs) valXs.dispose();
+                if (valYs) valYs.dispose();
+                if (testXs) testXs.dispose();
+                
+                trainXs = tf.tensor2d(trainSequences.slice(0, trainSize), [trainSize, maxLength], 'int32');
+                trainYs = trainLabels.slice(0, trainSize);
+                valXs = tf.tensor2d(trainSequences.slice(trainSize), [trainSequences.length - trainSize, maxLength], 'int32');
+                valYs = trainLabels.slice(trainSize);
+                testXs = tf.tensor2d(testSequences, [testSequences.length, maxLength], 'int32');
+
+                // Dispose of original large tensor
+                trainLabels.dispose();
+            });
+
+
+            tokenizeStatus.textContent = `✅ Tokenization Complete! Vocab Size: ${vocabSize}. 
+                Train Samples: ${trainXs.shape[0]}, Validation Samples: ${valXs.shape[0]}.`;
+            document.getElementById('trainBtn').disabled = false;
+            document.getElementById('predictBtn').disabled = false;
+            // The remaining buttons (evaluate/batch) are enabled after training
+        }
+
+        // --- STEPS 4 & 5: OPTIMIZED MODEL CONSTRUCTION ---
+        function createModel() {
+            // Increased dimension for richer vector representation
+            const embeddingDim = parseInt(document.getElementById('embeddingDim').value) || 128; 
+            const maxLength = parseInt(document.getElementById('maxLength').value);
+            
+            if (model) model.dispose();
+
+            model = tf.sequential();
+            
+            // 1. Embedding Layer 
+            model.add(tf.layers.embedding({
+                inputDim: vocabSize, 
+                outputDim: embeddingDim, 
+                inputLength: maxLength,
+                name: 'Embedding_Layer'
+            }));
+            
+            // 2. Stacked Conv1D Layers (Deeper feature extraction, better capacity)
+            model.add(tf.layers.conv1d({
+                filters: 128, 
+                kernelSize: 5, 
+                activation: 'relu',
+                kernelInitializer: 'heNormal', // Better initialization for ReLU
+                name: 'Conv1D_1'
+            }));
+            
+            model.add(tf.layers.conv1d({ // Second Conv layer for deeper features
+                filters: 64, 
+                kernelSize: 3, 
+                activation: 'relu',
+                name: 'Conv1D_2'
+            }));
+
+
+            // 3. Global Pooling (Using Average pooling for more context retention - better than Max for text)
+            model.add(tf.layers.globalAveragePooling1d({
+                name: 'GlobalAveragePooling'
+            }));
+
+            // 4. Dense Layer (Increased units)
+            model.add(tf.layers.dense({ 
+                units: 32, 
+                activation: 'relu',
+                name: 'Dense_Hidden'
+            }));
+
+            // 5. Dropout (Regularization)
+            model.add(tf.layers.dropout({ 
+                rate: 0.5,
+                name: 'Dropout'
+            }));
+
+            // 6. Output Layer (Binary classification)
+            model.add(tf.layers.dense({ 
+                units: 1, 
+                activation: 'sigmoid',
+                name: 'Output_Sigmoid'
+            }));
+
+            // Compilation: Tuned Adam optimizer with a lower learning rate for stability
+            model.compile({
+                optimizer: tf.train.adam(0.0005), // Slower learning rate (e.g., 0.0005)
+                loss: 'binaryCrossentropy',
+                metrics: ['accuracy']
+            });
+
+            return model;
+        }
+
+        // --- STEP 6: MODEL TRAINING (FIXED BUTTON ENABLING & DISPOSAL) ---
+        async function trainModel() {
+            if (!trainXs) {
+                document.getElementById('trainStatus').textContent = "Please tokenize data first.";
+                return;
+            }
+
+            const trainStatus = document.getElementById('trainStatus');
+            const createdModel = createModel();
+            
+            tfvis.show.modelSummary({ name: 'Model Summary' }, createdModel);
+
+            trainStatus.textContent = "Training model (using larger batch size for speed)...";
+            
+            const history = await createdModel.fit(trainXs, trainYs, {
+                epochs: 15, // Increased epochs for better convergence
+                batchSize: 64, // INCREASED BATCH SIZE for better efficiency and speed
+                validationData: [valXs, valYs],
+                callbacks: tfvis.show.fitCallbacks(
+                    { name: 'Training Performance' },
+                    ['loss', 'val_loss', 'acc', 'val_acc'],
+                    { height: 200, callbacks: ['onEpochEnd'] }
+                )
+            });
+
+            trainStatus.textContent = "✅ Training Complete! Ready for Evaluation and Export.";
+            
+            // FIX: Enable the buttons for the final steps (8 and 9)
+            document.getElementById('evaluateBtn').disabled = false;
+            document.getElementById('batchBtn').disabled = false;
+
+            // --- Memory Management: Dispose of training tensors ONLY after use ---
+            // valXs, valYs, testXs are kept for steps 8 and 9.
+            if (trainXs) trainXs.dispose();
+            if (trainYs) trainYs.dispose();
+        }
+
+        // --- STEP 7: LIVE PREDICTION INTERFACE (with inverted fix) ---
+        function livePredict() {
+            if (!model) {
+                document.getElementById('live-prediction-output').textContent = "Model not trained yet.";
+                return;
+            }
+
+            const textInput = document.getElementById('liveTextInput').value;
+            const outputDiv = document.getElementById('live-prediction-output');
+            const maxLength = parseInt(document.getElementById('maxLength').value);
+
+            if (!textInput.trim()) {
+                outputDiv.textContent = "Please enter text to predict.";
+                return;
+            }
+
+            tf.tidy(() => {
+                // Preprocessing pipeline
+                const sequence = textInput.toLowerCase().split(/\W+/)
+                    .filter(w => w.length > 0)
+                    .map(word => wordIndex[word] || wordIndex['<unk>']);
+
+                // Pad/truncate
+                const paddedSequence = (() => {
+                    if (sequence.length > maxLength) {
+                        return sequence.slice(0, maxLength);
+                    } else if (sequence.length < maxLength) {
+                        const padding = new Array(maxLength - sequence.length).fill(wordIndex['<pad>']);
+                        return sequence.concat(padding);
+                    }
+                    return sequence;
+                })();
+
+                const inputTensor = tf.tensor2d([paddedSequence], [1, maxLength], 'int32');
+
+                // Model inference
+                const prediction = model.predict(inputTensor);
+                const score = prediction.dataSync()[0]; // Model output: Probability of Label 1 (AI)
+
+                // FIX: Assuming the model learned inverted labels (High score = Human, Low score = AI)
+                const isAI = score < 0.5; // INVERTED: Low score now means AI (Label 1)
+
+                const resultClass = isAI ? 'ai' : 'human';
+                const resultText = isAI ? 'AI' : 'Human';
+                
+                // Confidence: If it's AI (isAI=true), confidence is 1 - score. If it's Human, confidence is score.
+                const confidence = isAI ? (1 - score) : score; 
+
+                outputDiv.className = resultClass;
+                outputDiv.innerHTML = `
+                    Prediction: <span style="font-weight: bold;">${resultText}</span><br>
+                    Confidence: ${Math.round(confidence * 10000) / 100}%
+                `;
+            });
+            // Tensor disposal is handled by tf.tidy()
+        }
+
+        // --- STEP 8: MODEL EVALUATION & METRICS (FIXED TENSOR DISPOSAL) ---
+        async function evaluateModel() {
+            if (!model || !valXs) {
+                document.getElementById('metrics-output').innerHTML = "Model not trained or validation data missing. Run steps 1-6 first.";
+                return;
+            }
+            
+            const threshold = 0.5; // Fixed threshold for this example
+
+            document.getElementById('metrics-output').innerHTML = "Calculating metrics...";
+
+            tf.tidy(() => {
+                const valPredictions = model.predict(valXs);
+                const valLabels = valYs.dataSync();
+                const predictionsArray = Array.from(valPredictions.dataSync());
+                
+                let TN = 0, FP = 0, FN = 0, TP = 0;
+
+                for (let i = 0; i < valLabels.length; i++) {
+                    const actual = valLabels[i];
+                    // FIX INVERSION HERE TOO: If score < 0.5, predict 1 (AI). If score >= 0.5, predict 0 (Human).
+                    const predicted = predictionsArray[i] < threshold ? 1 : 0; 
+
+                    if (actual === 0 && predicted === 0) TN++; // Actual Human (0), Predicted Human (0)
+                    else if (actual === 0 && predicted === 1) FP++; // Actual Human (0), Predicted AI (1)
+                    else if (actual === 1 && predicted === 0) FN++; // Actual AI (1), Predicted Human (0)
+                    else if (actual === 1 && predicted === 1) TP++; // Actual AI (1), Predicted AI (1)
+                }
+
+                const accuracy = (TP + TN) / (TP + TN + FP + FN);
+                const precision = TP / (TP + FP || 1e-7); // Precision for the positive class (AI, label 1)
+                const recall = TP / (TP + FN || 1e-7); // Recall for the positive class (AI, label 1)
+                const f1Score = 2 * (precision * recall) / (precision + recall || 1e-7);
+
+                const metricsHTML = `
+                    <h4>Model Evaluation Metrics (Threshold: ${threshold})</h4>
+                    <table>
+                        <tr><th>Metric</th><th>Value</th></tr>
+                        <tr><td>Accuracy</td><td>${accuracy.toFixed(4)}</td></tr>
+                        <tr><td>Precision (AI)</td><td>${precision.toFixed(4)}</td></tr>
+                        <tr><td>Recall (AI)</td><td>${recall.toFixed(4)}</td></tr>
+                        <tr><td>F1-Score (AI)</td><td>${f1Score.toFixed(4)}</td></tr>
+                    </table>
+                    
+                    <h4>Confusion Matrix</h4>
+                    <table>
+                        <tr><th></th><th>Predicted Human (0)</th><th>Predicted AI (1)</th></tr>
+                        <tr><th>Actual Human (0)</th><td>TN: ${TN}</td><td>FP: ${FP}</td></tr>
+                        <tr><th>Actual AI (1)</th><td>FN: ${FN}</td><td>TP: ${TP}</td></tr>
+                    </table>
+                `;
+                document.getElementById('metrics-output').innerHTML = metricsHTML;
+            });
+            
+            // --- Memory Management: Dispose of validation tensors AFTER use ---
+            if (valXs) valXs.dispose();
+            if (valYs) valYs.dispose();
+        }
+
+        // --- STEP 9: BATCH PREDICTION & EXPORT (FIXED TENSOR DISPOSAL AND INVERSION) ---
+        function batchPredictAndExport() {
+            if (!model || !testXs || testData.length === 0) {
+                document.getElementById('exportStatus').textContent = "Model not trained or test data missing. Run steps 1-6 first.";
+                return;
+            }
+
+            document.getElementById('exportStatus').textContent = "Running batch prediction...";
+
+            tf.tidy(() => {
+                // Run predictions on held-out test set
+                const predictions = model.predict(testXs);
+                const probabilities = Array.from(predictions.dataSync());
+
+                // Prepare CSV content
+                let csvContent = "Text Snippet,Prediction Label (0=Human, 1=AI),AI Probability Score\n";
+
+                testData.forEach((d, i) => {
+                    const prob = probabilities[i]; // Raw score from model (0=AI, 1=Human due to inversion)
+                    
+                    // FIX: If prob is HIGH (prob > 0.5), it is HUMAN (0). 
+                    // If prob is LOW (prob < 0.5), it is AI (1).
+                    const label = prob > 0.5 ? 0 : 1; 
+                    
+                    // The exported score should be the probability of the AI class (1), which is (1 - prob)
+                    const ai_prob = 1 - prob; // This is the probability that it's AI (Label 1)
+
+                    // Escape quotes in text snippets for CSV
+                    const text = `"${d.original_text.replace(/"/g, '""')}"`;
+                    
+                    csvContent += `${text},${label},${ai_prob.toFixed(6)}\n`;
+                });
+
+                // Create a downloadable blob
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.setAttribute("href", url);
+                link.setAttribute("download", "batch_predictions.csv");
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                document.getElementById('exportStatus').textContent = "✅ Predictions exported as batch_predictions.csv!";
+            });
+            // --- Memory Management: Dispose of test input tensor AFTER use ---
+            if (testXs) testXs.dispose(); 
+        }
+    </script>
+
+</body>
+</html>
