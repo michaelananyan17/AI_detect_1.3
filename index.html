@@ -76,6 +76,15 @@
         let wordIndex = {};
         let vocabSize = 0;
         let model;
+        
+        // Helper to safely dispose of a tensor if it exists
+        function safeDispose(tensor) {
+            if (tensor && tensor.isDisposed === false) {
+                tensor.dispose();
+                return true;
+            }
+            return false;
+        }
 
         // --- STEP 1: DATA LOAD & PREPARATION ---
         async function loadAndPrepareData() {
@@ -89,7 +98,7 @@
             }
 
             try {
-                // Helper to read and parse CSV
+                // Helper to read and parse CSV (kept minimal for focus on TFJS)
                 const parseCSV = (file) => new Promise((resolve, reject) => {
                     const reader = new FileReader();
                     reader.onload = (e) => {
@@ -149,7 +158,8 @@
 
         // --- STEP 2: DATA INSPECTION & ANALYSIS (Visualization) ---
         function analyzeData(data) {
-            const labels = data.map(d => d.label);
+            // ... (Visualization code omitted for brevity but is unchanged) ...
+             const labels = data.map(d => d.label);
             const humanCount = labels.filter(l => l === 0).length;
             const aiCount = labels.filter(l => l === 1).length;
             const total = labels.length;
@@ -193,7 +203,7 @@
             tokenizeStatus.textContent = "Building vocabulary and tokenizing...";
             
             tf.tidy(() => { 
-                // 1. Create vocabulary from training texts only
+                // 1. Create vocabulary 
                 const allTrainWords = trainData.flatMap(d => d.text.toLowerCase().split(/\W+/).filter(w => w.length > 0));
                 const wordCounts = allTrainWords.reduce((acc, word) => {
                     acc[word] = (acc[word] || 0) + 1;
@@ -208,7 +218,7 @@
                 });
                 vocabSize = Object.keys(wordIndex).length;
 
-                // 2. Convert text to integer sequences and pad/truncate
+                // 2. Convert text to integer sequences
                 const textsToSequences = (data) => data.map(d => {
                     const sequence = d.text.toLowerCase().split(/\W+/)
                         .filter(w => w.length > 0)
@@ -231,12 +241,12 @@
                 // 3. 80/20 train-validation split
                 const trainSize = Math.floor(trainSequences.length * 0.8);
 
-                // Dispose previous tensors to avoid memory leaks
-                if (trainXs) trainXs.dispose();
-                if (trainYs) trainYs.dispose();
-                if (valXs) valXs.dispose();
-                if (valYs) valYs.dispose();
-                if (testXs) testXs.dispose();
+                // Dispose previous tensors safely
+                safeDispose(trainXs);
+                safeDispose(trainYs);
+                safeDispose(valXs);
+                safeDispose(valYs);
+                safeDispose(testXs);
                 
                 // Create new tensors (available globally)
                 trainXs = tf.tensor2d(trainSequences.slice(0, trainSize), [trainSize, maxLength], 'int32');
@@ -257,7 +267,8 @@
 
         // --- STEPS 4 & 5: OPTIMIZED MODEL CONSTRUCTION ---
         function createModel() {
-            const embeddingDim = parseInt(document.getElementById('embeddingDim').value) || 128; 
+            // ... (Model creation code omitted for brevity but is unchanged) ...
+             const embeddingDim = parseInt(document.getElementById('embeddingDim').value) || 128; 
             const maxLength = parseInt(document.getElementById('maxLength').value);
             
             if (model) model.dispose();
@@ -330,10 +341,13 @@
 
             trainStatus.textContent = "Training model (using larger batch size for speed)...";
             
+            // Check if valXs/valYs exist BEFORE starting fit (though they should if tokenize ran)
+            const validationData = (valXs && valYs) ? [valXs, valYs] : undefined;
+            
             const history = await createdModel.fit(trainXs, trainYs, {
                 epochs: 15, 
                 batchSize: 64, 
-                validationData: [valXs, valYs],
+                validationData: validationData,
                 callbacks: tfvis.show.fitCallbacks(
                     { name: 'Training Performance' },
                     ['loss', 'val_loss', 'acc', 'val_acc'],
@@ -343,26 +357,33 @@
 
             trainStatus.textContent = "✅ Training Complete! Ready for Evaluation and Export.";
             
-            // FIX: Enable the final buttons conditionally based on tensor availability
-            if (valXs && valYs) {
+            // --- FIX: Explicitly check for global tensors and enable buttons ---
+            // Step 8: Evaluation requires validation data
+            if (valXs && valYs && valXs.isDisposed === false && valYs.isDisposed === false) {
                 document.getElementById('evaluateBtn').disabled = false;
+                console.log("Evaluation button enabled.");
             } else {
-                console.warn("Cannot enable Evaluation button: Validation tensors (valXs, valYs) are missing.");
+                document.getElementById('evaluateBtn').disabled = true; // Ensure disabled if data is missing
+                console.warn("Evaluation data (valXs, valYs) is missing or disposed. Step 8 is disabled.");
             }
             
-            if (testXs) {
+            // Step 9: Batch Prediction requires test data
+            if (testXs && testXs.isDisposed === false) {
                 document.getElementById('batchBtn').disabled = false;
+                console.log("Batch Predict button enabled.");
             } else {
-                console.warn("Cannot enable Batch Export button: Test tensor (testXs) is missing.");
+                document.getElementById('batchBtn').disabled = true; // Ensure disabled if data is missing
+                console.warn("Test data (testXs) is missing or disposed. Step 9 is disabled.");
             }
 
             // --- Memory Management: Dispose of training tensors ONLY after use ---
-            if (trainXs) trainXs.dispose();
-            if (trainYs) trainYs.dispose();
+            safeDispose(trainXs);
+            safeDispose(trainYs);
         }
 
         // --- STEP 7: LIVE PREDICTION INTERFACE (with inverted fix) ---
         function livePredict() {
+            // ... (Live predict code omitted for brevity but is unchanged) ...
             if (!model) {
                 document.getElementById('live-prediction-output').textContent = "Model not trained yet.";
                 return;
@@ -397,7 +418,6 @@
                 const prediction = model.predict(inputTensor);
                 const score = prediction.dataSync()[0]; 
 
-                // FIX: Inverted labels (High score = Human, Low score = AI)
                 const isAI = score < 0.5; 
 
                 const resultClass = isAI ? 'ai' : 'human';
@@ -415,8 +435,9 @@
 
         // --- STEP 8: MODEL EVALUATION & METRICS (Final Disposal of Validation Data) ---
         async function evaluateModel() {
-            if (!model || !valXs) {
-                document.getElementById('metrics-output').innerHTML = "Model not trained or validation data missing. Run steps 1-6 first.";
+            if (!model || !valXs || valXs.isDisposed) { // Check disposal status
+                document.getElementById('metrics-output').innerHTML = "Model not trained or **validation data is missing/disposed**. Run steps 1-6 first.";
+                console.error("Evaluation failed: valXs or valYs missing or disposed.");
                 return;
             }
             
@@ -433,7 +454,7 @@
 
                 for (let i = 0; i < valLabels.length; i++) {
                     const actual = valLabels[i];
-                    // FIX: Inverted prediction logic for metrics calculation
+                    // Inverted prediction logic
                     const predicted = predictionsArray[i] < threshold ? 1 : 0; 
 
                     if (actual === 0 && predicted === 0) TN++; 
@@ -468,14 +489,16 @@
             });
             
             // --- Memory Management: Dispose of validation tensors AFTER use ---
-            if (valXs) valXs.dispose();
-            if (valYs) valYs.dispose();
+            safeDispose(valXs);
+            safeDispose(valYs);
+            document.getElementById('evaluateBtn').disabled = true; // Disable after single use
         }
 
         // --- STEP 9: BATCH PREDICTION & EXPORT (Final Disposal of Test Data) ---
         function batchPredictAndExport() {
-            if (!model || !testXs || testData.length === 0) {
-                document.getElementById('exportStatus').textContent = "Model not trained or test data missing. Run steps 1-6 first.";
+            if (!model || !testXs || testXs.isDisposed || testData.length === 0) { // Check disposal status
+                document.getElementById('exportStatus').textContent = "Model not trained or **test data is missing/disposed**. Run steps 1-6 first.";
+                console.error("Batch prediction failed: testXs missing or disposed.");
                 return;
             }
 
@@ -490,10 +513,10 @@
                 testData.forEach((d, i) => {
                     const prob = probabilities[i];
                     
-                    // FIX: If prob is HIGH (prob > 0.5), it is HUMAN (0). 
+                    // Prediction logic: prob > 0.5 means Human (0)
                     const label = prob > 0.5 ? 0 : 1; 
                     
-                    // Calculate AI probability (1 - raw score)
+                    // Calculate AI probability: 1 - raw score
                     const ai_prob = 1 - prob; 
 
                     const text = `"${d.original_text.replace(/"/g, '""')}"`;
@@ -501,6 +524,7 @@
                     csvContent += `${text},${label},${ai_prob.toFixed(6)}\n`;
                 });
 
+                // Create a downloadable blob
                 const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement("a");
@@ -513,8 +537,10 @@
 
                 document.getElementById('exportStatus').textContent = "✅ Predictions exported as batch_predictions.csv!";
             });
+            
             // --- Memory Management: Dispose of test input tensor AFTER use ---
-            if (testXs) testXs.dispose(); 
+            safeDispose(testXs); 
+            document.getElementById('batchBtn').disabled = true; // Disable after single use
         }
     </script>
 
